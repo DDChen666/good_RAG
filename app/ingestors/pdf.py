@@ -2,16 +2,33 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Iterable, List
 
+from pypdf import PdfReader
+
+LOGGER = logging.getLogger(__name__)
+
 
 def extract_text(pdf_paths: Iterable[Path]) -> List[str]:
-    """Placeholder PDF extractor.
+    """Extract plain text from the provided PDF files.
 
-    The production version should rely on libraries such as PyMuPDF or
-    pdfplumber.  This stub returns simple marker strings so that unit tests can
-    be written without external dependencies.
+    ``pypdf`` is used for its pure-Python implementation so the ingestion can
+    run inside the container without extra system libraries.  Each element in
+    the returned list corresponds to the respective ``pdf_paths`` entry.  When a
+    file cannot be parsed the function logs the error and returns an empty
+    string placeholder so the caller can surface the failure in the job status.
     """
 
-    return [f"<pdf:{path.name}>" for path in pdf_paths]
+    texts: List[str] = []
+    for path in pdf_paths:
+        try:
+            reader = PdfReader(str(path))
+            pages = [page.extract_text() or "" for page in reader.pages]
+            text = "\n".join(pages).strip()
+            texts.append(text)
+        except Exception as exc:  # pragma: no cover - depends on input PDFs
+            LOGGER.warning("Failed to extract PDF %s: %s", path, exc)
+            texts.append("")
+    return texts

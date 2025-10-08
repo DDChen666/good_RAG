@@ -7,9 +7,15 @@ across processes.
 """
 
 from functools import lru_cache
+from pathlib import Path
 from typing import List, Optional
 
-from pydantic import BaseSettings, Field, HttpUrl
+try:
+    from pydantic_settings import BaseSettings
+except ImportError:  # pragma: no cover - fallback for Pydantic v1 environments
+    from pydantic import BaseSettings  # type: ignore
+
+from pydantic import Field, HttpUrl
 
 
 class Settings(BaseSettings):
@@ -53,6 +59,18 @@ class Settings(BaseSettings):
     api_key: Optional[str] = Field(
         default=None,
         description="Optional static API key for simple authn.",
+    )
+    gemini_api_key: Optional[str] = Field(
+        default=None,
+        description="Optional Gemini API key used when integrating a generation model.",
+    )
+    gemini_model: str = Field(
+        default="gemini-2.5-flash",
+        description="LLM model identifier used for answer generation.",
+    )
+    upload_dir: Path = Field(
+        default=Path("/data/uploads"),
+        description="Directory where uploaded files are stored for ingestion.",
     )
     http_timeout: float = Field(
         default=10.0,

@@ -17,7 +17,9 @@ class Citation(BaseModel):
 
 
 class QueryDiagnostics(BaseModel):
+    embedding_ms: Optional[int] = None
     retrieval_ms: int
+    rerank_ms: Optional[int] = None
     fusion_ms: int
     total_ms: int
     query_body: dict

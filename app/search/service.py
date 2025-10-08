@@ -3,13 +3,69 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+import math
+import time
+from typing import Any, Dict, Iterable, List, Optional
 
 from app.config import settings
+from app.search.embedding import embedding_client
+from app.search.generation import generate_answer
 from app.search.hybrid import build_answer_context, reciprocal_rank_fusion
 from app.search.opensearch_client import client
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _build_filter_clauses(domain_filter: Optional[List[str]], version: Optional[str]) -> List[Dict[str, Any]]:
+    clauses: List[Dict[str, Any]] = []
+    if domain_filter:
+        clauses.append({"terms": {"source": domain_filter}})
+    if version:
+        clauses.append({"term": {"version": version}})
+    return clauses
+
+
+def _normalise_hits(raw_hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    hits: List[Dict[str, Any]] = []
+    for rank, hit in enumerate(raw_hits, start=1):
+        source = hit.get("_source", {})
+        content = source.get("content", "")
+        snippet = content[:400] + ("…" if len(content) > 400 else "")
+        hits.append(
+            {
+                "id": source.get("doc_key", hit.get("_id")),
+                "title": source.get("h_path", [source.get("source", "Document")])[-1] if source.get("h_path") else source.get("source", "Document"),
+                "url": source.get("url"),
+                "snippet": snippet,
+                "content": content,
+                "score": hit.get("_score"),
+                "rank": rank,
+                "source": source.get("source"),
+                "version": source.get("version"),
+                "h_path": source.get("h_path", []),
+                "vector": source.get("content_vector"),
+            }
+        )
+    return hits
+
+
+def _vector_ranking(hits: Iterable[Dict[str, Any]], query_vector: List[float]) -> List[Dict[str, Any]]:
+    q_norm = math.sqrt(sum(value * value for value in query_vector))
+    if q_norm == 0.0:
+        return []
+
+    ranked: List[Dict[str, Any]] = []
+    for hit in hits:
+        vector = hit.get("vector")
+        if not vector or len(vector) != len(query_vector):
+            continue
+        d_norm = math.sqrt(sum(value * value for value in vector))
+        if d_norm == 0.0:
+            continue
+        score = sum(q * d for q, d in zip(query_vector, vector)) / (q_norm * d_norm)
+        ranked.append({**hit, "score": score})
+    ranked.sort(key=lambda item: item["score"], reverse=True)
+    return ranked
 
 
 class SearchService:
@@ -22,35 +78,66 @@ class SearchService:
             LOGGER.warning("OpenSearch index bootstrap skipped due to connection issues.")
 
     def query(self, query: str, domain_filter: Optional[List[str]] = None, version: Optional[str] = None) -> Dict[str, Any]:
-        """Return a placeholder answer payload.
+        start_total = time.perf_counter()
+        filter_clauses = _build_filter_clauses(domain_filter, version)
 
-        The implementation currently builds the hybrid search request body and
-        returns it alongside synthetic citations so API consumers can inspect
-        the structure.  Retrieval integration can be added by extending this
-        method to execute the generated query using OpenSearch's REST API and
-        optionally calling a generation model.
-        """
+        # Generate query embedding
+        embed_start = time.perf_counter()
+        query_vectors = embedding_client.embed([query])
+        query_vector = query_vectors[0] if query_vectors else []
+        embed_ms = int((time.perf_counter() - embed_start) * 1000)
 
-        filters: Dict[str, Any] = {}
-        if domain_filter:
-            filters["domain"] = domain_filter[0]
-        if version:
-            filters["version"] = version
-        query_body = client.hybrid_search(query=query, filters=filters)
-        LOGGER.debug("Hybrid query body: %s", query_body)
-        mock_hit = {
-            "id": "demo-doc",
-            "title": "Placeholder citation",
-            "url": "https://example.com/docs",
-            "snippet": "Hybrid search body prepared; connect OpenSearch to enable retrieval.",
-            "h_path": ["API Reference"],
+        bool_filter = {"filter": filter_clauses} if filter_clauses else {}
+
+        text_query = {
+            "size": settings.bm25_top_n,
+            "query": {
+                "bool": {
+                    **bool_filter,
+                    "must": {"match": {"content": query}},
+                }
+            },
         }
-        fused = reciprocal_rank_fusion([[mock_hit]], k=settings.rrf_k)
-        context = build_answer_context(fused[: settings.query_top_k])
+
+        retrieval_start = time.perf_counter()
+        bm25_response = client.search(text_query)
+        retrieval_ms = int((time.perf_counter() - retrieval_start) * 1000)
+
+        bm25_hits = _normalise_hits(bm25_response.get("hits", {}).get("hits", []))
+        vector_hits: List[Dict[str, Any]] = []
+        rerank_ms = 0
+        if query_vector:
+            rerank_start = time.perf_counter()
+            vector_hits = _vector_ranking(bm25_hits, query_vector)
+            rerank_ms = int((time.perf_counter() - rerank_start) * 1000)
+
+        fused = reciprocal_rank_fusion([bm25_hits, vector_hits], k=settings.rrf_k)
+        top_hits = fused[: settings.query_top_k]
+        context = build_answer_context(top_hits)
+        for item in context:
+            item.pop("vector", None)
+
+        answer = generate_answer(query, context)
+
+        total_ms = int((time.perf_counter() - start_total) * 1000)
+        diagnostics = {
+            "embedding_ms": embed_ms,
+            "retrieval_ms": retrieval_ms,
+            "rerank_ms": rerank_ms,
+            "total_ms": total_ms,
+            "bm25_query": text_query,
+            "bm25_hits": len(bm25_hits),
+            "vector_hits": len(vector_hits),
+            "fusion_ms": rerank_ms,
+            "query_body": {"text": text_query},
+        }
+        if settings.gemini_api_key:
+            diagnostics["llm_model"] = settings.gemini_model
+
         return {
-            "answer": "Hybrid retrieval pipeline initialised. Connect OpenSearch to return live results.",
+            "answer": answer,
             "citations": context,
-            "diagnostics": {"retrieval_ms": 0, "fusion_ms": 0, "total_ms": 0, "query_body": query_body},
+            "diagnostics": diagnostics,
         }
 
 

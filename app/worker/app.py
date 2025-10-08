@@ -14,6 +14,7 @@ celery_app = Celery(
 celery_app.conf.task_track_started = True
 celery_app.conf.result_expires = 3600
 celery_app.conf.worker_prefetch_multiplier = 1
+celery_app.autodiscover_tasks(packages=["app.worker"])
 
 
 @celery_app.task(name="worker.healthcheck")

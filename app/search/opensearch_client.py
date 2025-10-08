@@ -124,16 +124,27 @@ class OpenSearchClient:
         if data.get("errors"):
             LOGGER.error("Bulk indexing reported errors: %s", data)
 
-    def hybrid_search(self, query: str, filters: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def hybrid_search(
+        self,
+        query: str,
+        filters: Optional[Dict[str, Any]] = None,
+        query_vector: Optional[List[float]] = None,
+    ) -> Dict[str, Any]:
         """Build a hybrid query request body for inspection or execution."""
 
         if filters is None:
             filters = {}
         should_filters: List[Dict[str, Any]] = []
         if domain := filters.get("domain"):
-            should_filters.append({"term": {"source": domain}})
+            if isinstance(domain, list):
+                should_filters.append({"terms": {"source": domain}})
+            else:
+                should_filters.append({"term": {"source": domain}})
         if version := filters.get("version"):
-            should_filters.append({"term": {"version": version}})
+            if isinstance(version, list):
+                should_filters.append({"terms": {"version": version}})
+            else:
+                should_filters.append({"term": {"version": version}})
         query_body = {
             "size": max(settings.bm25_top_n, settings.vector_top_n),
             "query": {
@@ -144,8 +155,8 @@ class OpenSearchClient:
                             "script_score": {
                                 "query": {"match_all": {}},
                                 "script": {
-                                    "source": "cosineSimilarity(params.query_vector, 'content_vector') + 1.0",
-                                    "params": {"query_vector": []},
+                                "source": "cosineSimilarity(params.query_vector, doc['content_vector']) + 1.0",
+                                    "params": {"query_vector": query_vector or []},
                                 },
                             }
                         },
@@ -155,6 +166,23 @@ class OpenSearchClient:
             },
         }
         return query_body
+
+    def search(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a search request against the configured index."""
+
+        search_endpoint = urljoin(str(settings.os_url), f"/{settings.index_name}/_search")
+        response = requests.post(
+            search_endpoint,
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(body),
+            timeout=settings.http_timeout,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            LOGGER.error("OpenSearch _search failed: %s -- payload=%s -- response=%s", exc, body, response.text)
+            raise
+        return response.json()
 
 
 client = OpenSearchClient()

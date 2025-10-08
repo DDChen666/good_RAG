@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>good_RAG 控制台</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <h1>good_RAG 控制台</h1>
+      <p>快速操作匯入、查詢與健康檢查的單頁介面。</p>
+    </header>
+
+    <main class="layout">
+      <section class="panel panel--full panel--instructions" aria-labelledby="guide-title">
+        <h2 id="guide-title">快速使用指南</h2>
+        <ol class="usage-list">
+          <li>
+            <strong>啟動服務</strong>：在終端機執行 <code>docker compose up -d --build</code>，確認 API、Worker、Redis、Ollama 均為
+            <code>Up</code> 狀態。
+          </li>
+          <li>
+            <strong>設定權杖（若有）</strong>：於「認證與基本操作」儲存 <code>X-API-Key</code>，瀏覽器會在本機記住金鑰。
+          </li>
+          <li>
+            <strong>進行健康檢查</strong>：點擊「健康檢查」或「列出資料來源」，確認流程正常後再進行查詢或匯入。
+          </li>
+          <li>
+            <strong>送出查詢</strong>：在「混合檢索查詢」輸入問題並提交，結果將顯示於底部「結果」面板。
+          </li>
+          <li>
+            <strong>提交匯入</strong>：拖曳 PDF / Markdown 檔至下方區塊或貼上網址，選擇同步或非同步提交，再用右下角表單追蹤 Job 狀態。
+          </li>
+        </ol>
+        <p class="hint">
+          提醒：結果面板會顯示最後一次 API 回應，可直接複製 JSON 進行除錯。若需整合 Gemini，請在 <code>.env</code> 設定
+          <code>GEMINI_API_KEY</code> 並重新建置容器。
+        </p>
+      </section>
+
+      <section class="panel" aria-labelledby="auth-panel-title">
+        <h2 id="auth-panel-title">認證與基本操作</h2>
+        <form id="api-key-form" class="form-grid">
+          <label for="api-key-input">X-API-Key（可選）</label>
+          <input type="password" id="api-key-input" placeholder="未設定可留空" />
+          <button type="submit">儲存金鑰</button>
+          <button type="button" id="clear-api-key">清除</button>
+        </form>
+        <div class="actions-inline">
+          <button id="health-check">健康檢查</button>
+          <button id="list-sources">列出資料來源</button>
+          <button id="random-uuid">取得隨機 UUID</button>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="query-panel-title">
+        <h2 id="query-panel-title">混合檢索查詢</h2>
+        <form id="query-form" class="form-grid">
+          <label for="query-input">查詢內容</label>
+          <textarea id="query-input" rows="3" placeholder="輸入問題，例如：OpenSearch 預設索引結構？" required></textarea>
+
+          <label for="top-k-input">Top K（可選）</label>
+          <input type="number" id="top-k-input" min="1" placeholder="預設依後端設定" />
+
+          <label for="domain-input">Domain Filter（可選，多個以逗號分隔）</label>
+          <input type="text" id="domain-input" placeholder="例如：openai-docs, api-guide" />
+
+          <label for="version-input">版本標籤（可選）</label>
+          <input type="text" id="version-input" placeholder="例如：v1.0" />
+
+          <button type="submit">送出查詢</button>
+        </form>
+      </section>
+
+      <section class="panel" aria-labelledby="ingest-panel-title">
+        <h2 id="ingest-panel-title">資料匯入</h2>
+        <form id="ingest-form" class="form-grid">
+          <p class="form-hint">說明：拖曳或點擊上傳檔案後會自動儲存至容器共享資料夾（/data/uploads），並將路徑帶入匯入請求。</p>
+
+          <div class="upload-group">
+            <label for="pdf-file-list">PDF 檔案</label>
+            <div class="dropzone" id="pdf-dropzone">
+              <input type="file" id="pdf-picker" accept=".pdf" multiple hidden />
+              <div class="dropzone__hint">拖曳或點擊新增 .pdf 檔案</div>
+              <ul class="file-list" id="pdf-file-list"></ul>
+            </div>
+          </div>
+
+          <div class="upload-group">
+            <label for="md-file-list">Markdown 檔案</label>
+            <div class="dropzone" id="md-dropzone">
+              <input type="file" id="md-picker" accept=".md,.markdown,.mdown,.txt" multiple hidden />
+              <div class="dropzone__hint">拖曳或點擊新增 .md / .markdown 檔案</div>
+              <ul class="file-list" id="md-file-list"></ul>
+            </div>
+          </div>
+
+          <label for="urls-input">URL（每行一筆）</label>
+          <textarea id="urls-input" rows="2" placeholder="https://example.com/docs"></textarea>
+
+          <fieldset class="fieldset">
+            <legend>爬蟲設定（選填）</legend>
+            <label for="crawl-depth">最大深度</label>
+            <input type="number" id="crawl-depth" min="0" placeholder="預設 3" />
+
+            <label for="crawl-pages">最大頁數</label>
+            <input type="number" id="crawl-pages" min="1" placeholder="預設 800" />
+
+            <label for="rate-limit">速率限制（每秒）</label>
+            <input type="number" step="0.1" id="rate-limit" min="0.1" placeholder="預設 1.0" />
+
+            <label for="same-domain">僅同網域</label>
+            <select id="same-domain">
+              <option value="">跟隨預設</option>
+              <option value="true">是</option>
+              <option value="false">否</option>
+            </select>
+
+            <label for="allow-subdomains">允許子網域</label>
+            <select id="allow-subdomains">
+              <option value="">跟隨預設</option>
+              <option value="true">是</option>
+              <option value="false">否</option>
+            </select>
+
+            <label for="include-paths">Include Paths（逗號分隔）</label>
+            <input type="text" id="include-paths" placeholder="/docs,/api" />
+
+            <label for="exclude-paths">Exclude Paths（逗號分隔）</label>
+            <input type="text" id="exclude-paths" placeholder="/blog" />
+          </fieldset>
+
+          <div class="actions-inline">
+            <button type="submit">提交匯入工作</button>
+            <button type="button" id="sync-button">以同步模式提交</button>
+          </div>
+        </form>
+
+        <form id="job-status-form" class="form-inline">
+          <label for="job-id-input">查詢匯入狀態（Job ID）</label>
+          <input type="text" id="job-id-input" placeholder="ingest-xxxx" required />
+          <button type="submit">查詢</button>
+        </form>
+      </section>
+
+      <section class="panel panel--output panel--full" aria-live="polite">
+        <h2>結果</h2>
+        <pre id="output" class="output">等待操作...</pre>
+      </section>
+    </main>
+
+    <footer class="page-footer">
+      <p>透過左側表單與 API 互動。若 API 有啟用金鑰保護，請先儲存 X-API-Key。</p>
+    </footer>
+
+    <script src="app.js" defer></script>
+  </body>
+</html>

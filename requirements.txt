@@ -3,5 +3,10 @@ uvicorn[standard]
 celery
 redis
 pydantic
+pydantic-settings
 requests
 python-dotenv
+pypdf
+beautifulsoup4
+google-genai
+python-multipart
