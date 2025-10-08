@@ -1,0 +1,6 @@
+endpoint:
+  - ["rate limit", "ratelimit", "throttling"]
+  - ["api key", "token", "secret key"]
+errors:
+  - ["unauthorized", "401", "invalid api key"]
+  - ["too many requests", "429", "rate limit exceeded"]
