@@ -1,0 +1,12 @@
+same_domain_only: true
+allow_subdomains: true
+max_depth: 3
+max_pages: 800
+rate_limit_per_sec: 1.0
+include_paths:
+  - /api
+  - /docs
+  - /reference
+exclude_paths:
+  - /blog
+  - /changelog

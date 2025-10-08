@@ -1,0 +1,67 @@
+version: "3.9"
+services:
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    platform: linux/arm64
+    environment:
+      - discovery.type=single-node
+      - OPENSEARCH_JAVA_OPTS=-Xms2g -Xmx2g
+      - plugins.security.disabled=true
+    ports:
+      - "9200:9200"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+
+  redis:
+    image: redis:7-alpine
+    platform: linux/arm64
+    ports:
+      - "6379:6379"
+
+  ollama:
+    image: ollama/ollama:latest
+    platform: linux/arm64
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+
+  api:
+    build: ./app
+    depends_on:
+      - opensearch
+      - redis
+      - ollama
+    environment:
+      - OS_URL=http://opensearch:9200
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_EMBED_MODEL=nomic-embed-text
+      - INDEX_NAME=docs_chunks_v1
+      - MAX_CRAWL_DEPTH=3
+      - MAX_CRAWL_PAGES=800
+      - RATE_LIMIT_PER_SEC=1.0
+    ports:
+      - "8000:8000"
+
+  worker:
+    build: ./app
+    command: celery -A worker.app.celery_app worker --loglevel=INFO
+    depends_on:
+      - opensearch
+      - redis
+      - ollama
+    environment:
+      - OS_URL=http://opensearch:9200
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_EMBED_MODEL=nomic-embed-text
+      - INDEX_NAME=docs_chunks_v1
+      - MAX_CRAWL_DEPTH=3
+      - MAX_CRAWL_PAGES=800
+      - RATE_LIMIT_PER_SEC=1.0
+
+volumes:
+  ollama:
