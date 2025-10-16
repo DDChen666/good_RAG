@@ -50,6 +50,21 @@ class Settings(BaseSettings):
         default=768,
         description="Fallback embedding dimensionality when Ollama detection fails.",
     )
+    chunk_target_tokens: int = Field(
+        default=320,
+        ge=50,
+        description="Target token window size used when chunking documents.",
+    )
+    chunk_overlap_tokens: int = Field(
+        default=64,
+        ge=0,
+        lt=1000,
+        description="Token overlap applied between consecutive chunks.",
+    )
+    use_ml_commons_remote_embeddings: bool = Field(
+        default=True,
+        description="Route embedding generation through OpenSearch ML Commons remote models when available.",
+    )
     bm25_top_n: int = Field(default=200, ge=1)
     vector_top_n: int = Field(default=200, ge=1)
     rrf_k: int = Field(default=60, ge=1)

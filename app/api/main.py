@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
+from pathlib import Path as FilePath
 from typing import Optional
 from urllib.parse import urljoin
 
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile, status
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Path, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,6 +19,7 @@ from app.schemas.ingest import IngestJobResponse, IngestRequest
 from app.schemas.query import QueryRequest, QueryResponse
 from app.schemas.status import HealthStatus, SourceListResponse
 from app.search.service import search_service
+from app.search.opensearch_client import client as opensearch_client
 from app.worker.app import healthcheck
 from app.worker.tasks import enqueue_ingest_job, get_job_status
 
@@ -70,7 +71,30 @@ def sync(request: IngestRequest) -> IngestJobResponse:
 
 @app.get("/sources", response_model=SourceListResponse, dependencies=[Depends(verify_api_key)])
 def list_sources() -> SourceListResponse:
-    return SourceListResponse(sources=[])
+    sources = opensearch_client.list_sources()
+    return SourceListResponse(sources=sources)
+
+
+@app.delete(
+    "/sources/{source_id}",
+    dependencies=[Depends(verify_api_key)],
+)
+def delete_source(
+    source_id: str = Path(..., description="Base64 URL 安全編碼的資料來源 ID。"),
+) -> dict:
+    try:
+        source_name = opensearch_client.decode_source_id(source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    try:
+        deleted = opensearch_client.delete_source(source_name)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    if deleted == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Source not found")
+    return {"status": "deleted", "source_id": source_id, "source": source_name, "deleted_documents": deleted}
 
 
 @app.get("/status/health", response_model=HealthStatus, dependencies=[Depends(verify_api_key)])
@@ -115,7 +139,7 @@ ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".md", ".markdown", ".mdown", ".txt"}
 
 @app.post("/upload", dependencies=[Depends(verify_api_key)])
 async def upload_file(file: UploadFile = File(...)) -> dict:
-    extension = Path(file.filename).suffix.lower()
+    extension = FilePath(file.filename).suffix.lower()
     if extension not in ALLOWED_UPLOAD_EXTENSIONS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported file type")
 
@@ -146,7 +170,7 @@ def delete_uploaded_file(upload_id: str) -> dict:
     return {"status": "deleted", "upload_id": upload_id}
 
 
-frontend_dir = Path(__file__).resolve().parents[1] / "ui" / "static"
+frontend_dir = FilePath(__file__).resolve().parents[1] / "ui" / "static"
 if frontend_dir.exists():
     app.mount("/ui", StaticFiles(directory=str(frontend_dir), html=True), name="ui")
 

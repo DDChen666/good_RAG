@@ -87,7 +87,13 @@ def run_ingest(self, payload: Dict[str, object]) -> Dict[str, object]:
             nodes.append(Node(content=text, metadata=metadata))
         ingested_sources.append({"type": "url", "url": url, "bytes": len(text.encode("utf-8"))})
 
-    chunks = list(chunk_nodes(nodes))
+    chunks = list(
+        chunk_nodes(
+            nodes,
+            target_size=settings.chunk_target_tokens,
+            overlap=settings.chunk_overlap_tokens,
+        )
+    )
     chunk_documents: List[Dict[str, Any]] = []
     skipped_chunks: List[Dict[str, Any]] = []
     now = datetime.utcnow().isoformat() + "Z"

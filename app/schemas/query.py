@@ -19,10 +19,12 @@ class Citation(BaseModel):
 class QueryDiagnostics(BaseModel):
     embedding_ms: Optional[int] = None
     retrieval_ms: int
+    vector_ms: Optional[int] = None
     rerank_ms: Optional[int] = None
     fusion_ms: int
     total_ms: int
     query_body: dict
+    vector_error: Optional[str] = None
 
 
 class QueryResponse(BaseModel):

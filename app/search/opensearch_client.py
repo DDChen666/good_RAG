@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import base64
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urljoin
 
@@ -73,15 +74,24 @@ class OpenSearchClient:
     def _build_mapping(self) -> Dict[str, Any]:
         dims = self.detected_dims
         return {
-            "settings": {"index": {"number_of_shards": 1, "number_of_replicas": 0}},
+            "settings": {
+                "index": {
+                    "number_of_shards": 1,
+                    "number_of_replicas": 0,
+                    "knn": True,
+                }
+            },
             "mappings": {
                 "properties": {
                     "content": {"type": "text"},
                     "content_vector": {
-                        "type": "dense_vector",
-                        "dims": dims,
-                        "index": True,
-                        "similarity": "cosine",
+                        "type": "knn_vector",
+                        "dimension": dims,
+                        "method": {
+                            "name": "hnsw",
+                            "engine": "nmslib",
+                            "space_type": "cosinesimil",
+                        },
                     },
                     "node_type": {"type": "keyword"},
                     "code_lang": {"type": "keyword"},
@@ -130,10 +140,9 @@ class OpenSearchClient:
         filters: Optional[Dict[str, Any]] = None,
         query_vector: Optional[List[float]] = None,
     ) -> Dict[str, Any]:
-        """Build a hybrid query request body for inspection or execution."""
+        """Return payloads suitable for BM25 and k-NN searches."""
 
-        if filters is None:
-            filters = {}
+        filters = filters or {}
         should_filters: List[Dict[str, Any]] = []
         if domain := filters.get("domain"):
             if isinstance(domain, list):
@@ -145,27 +154,28 @@ class OpenSearchClient:
                 should_filters.append({"terms": {"version": version}})
             else:
                 should_filters.append({"term": {"version": version}})
-        query_body = {
-            "size": max(settings.bm25_top_n, settings.vector_top_n),
+        text_query = {
+            "size": settings.bm25_top_n,
             "query": {
                 "bool": {
-                    "should": [
-                        {"match": {"content": query}},
-                        {
-                            "script_score": {
-                                "query": {"match_all": {}},
-                                "script": {
-                                "source": "cosineSimilarity(params.query_vector, doc['content_vector']) + 1.0",
-                                    "params": {"query_vector": query_vector or []},
-                                },
-                            }
-                        },
-                    ],
-                    "filter": should_filters,
+                    "must": {"match": {"content": query}},
+                    **({"filter": should_filters} if should_filters else {}),
                 }
             },
         }
-        return query_body
+        knn_body: Optional[Dict[str, Any]] = None
+        if query_vector:
+            knn_body = {
+                "knn": {
+                    "field": "content_vector",
+                    "query_vector": query_vector,
+                    "k": settings.vector_top_n,
+                    "num_candidates": max(settings.vector_top_n * 2, 50),
+                }
+            }
+            if should_filters:
+                knn_body["filter"] = {"bool": {"filter": should_filters}}
+        return {"text": text_query, "knn": knn_body}
 
     def search(self, body: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a search request against the configured index."""
@@ -183,6 +193,135 @@ class OpenSearchClient:
             LOGGER.error("OpenSearch _search failed: %s -- payload=%s -- response=%s", exc, body, response.text)
             raise
         return response.json()
+
+    def knn_search(
+        self,
+        query_vector: List[float],
+        k: int,
+        filter_clauses: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a k-NN search using the OpenSearch _knn_search API."""
+
+        if not query_vector:
+            return {}
+        endpoint = urljoin(str(settings.os_url), f"/{settings.index_name}/_search")
+        body: Dict[str, Any] = {
+            "size": max(k, 1),
+            "query": {
+                "knn": {
+                    "content_vector": {
+                        "vector": query_vector,
+                        "k": max(k, 1),
+                        "num_candidates": max(k * 2, 50),
+                    }
+                }
+            },
+        }
+        if filter_clauses:
+            filter_query: Dict[str, Any]
+            if len(filter_clauses) == 1:
+                filter_query = filter_clauses[0]
+            else:
+                filter_query = {"bool": {"filter": filter_clauses}}
+            body["query"]["knn"]["content_vector"]["filter"] = filter_query
+
+        response = requests.post(
+            endpoint,
+            headers={"Content-Type": "application/json"},
+            data=json.dumps(body),
+            timeout=settings.http_timeout,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            LOGGER.error("OpenSearch _knn_search failed: %s -- payload=%s -- response=%s", exc, body, response.text)
+            raise
+        return response.json()
+
+    @staticmethod
+    def encode_source_id(value: str) -> str:
+        """Return a URL-safe identifier for a given source name."""
+
+        raw = value.encode("utf-8")
+        token = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        return token
+
+    @staticmethod
+    def decode_source_id(token: str) -> str:
+        """Decode a URL-safe identifier back into the original source name."""
+
+        if not token:
+            raise ValueError("Source identifier cannot be empty.")
+        padding = "=" * (-len(token) % 4)
+        try:
+            raw = base64.urlsafe_b64decode(token + padding)
+        except (base64.binascii.Error, ValueError) as exc:
+            raise ValueError("Invalid source identifier.") from exc
+        return raw.decode("utf-8")
+
+    def list_sources(self, size: int = 500) -> List[Dict[str, Any]]:
+        """Return aggregated document counts per source."""
+
+        search_endpoint = urljoin(str(settings.os_url), f"/{settings.index_name}/_search")
+        body = {
+            "size": 0,
+            "aggs": {
+                "by_source": {
+                    "terms": {
+                        "field": "source",
+                        "size": size,
+                        "order": {"_key": "asc"},
+                    }
+                }
+            },
+        }
+        try:
+            response = requests.post(
+                search_endpoint,
+                data=json.dumps(body),
+                headers={"Content-Type": "application/json"},
+                timeout=settings.http_timeout,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            LOGGER.warning("Failed to list sources: %s", exc)
+            return []
+
+        buckets = response.json().get("aggregations", {}).get("by_source", {}).get("buckets", [])
+        sources: List[Dict[str, Any]] = []
+        for bucket in buckets:
+            key = bucket.get("key")
+            if not key:
+                continue
+            doc_count = int(bucket.get("doc_count", 0))
+            sources.append(
+                {
+                    "id": self.encode_source_id(str(key)),
+                    "name": str(key),
+                    "document_count": doc_count,
+                }
+            )
+        return sources
+
+    def delete_source(self, source_name: str) -> int:
+        """Delete all documents that belong to the given source. Returns the deleted count."""
+
+        delete_endpoint = urljoin(str(settings.os_url), f"/{settings.index_name}/_delete_by_query")
+        body = {"query": {"term": {"source": source_name}}}
+        try:
+            response = requests.post(
+                delete_endpoint,
+                data=json.dumps(body),
+                headers={"Content-Type": "application/json"},
+                timeout=settings.http_timeout,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            LOGGER.error("Failed to delete source '%s': %s", source_name, exc)
+            raise
+
+        payload = response.json()
+        return int(payload.get("deleted", 0))
 
 
 client = OpenSearchClient()

@@ -144,6 +144,22 @@
         </form>
       </section>
 
+      <section class="panel" aria-labelledby="database-panel-title">
+        <h2 id="database-panel-title">資料庫管理</h2>
+        <p class="form-hint">
+          查看目前索引中的來源檔案，刪除後會同步更新 OpenSearch 中的相關文本塊。列表每 15 秒自動更新，或可隨時手動刷新。
+        </p>
+        <div class="source-toolbar">
+          <button type="button" id="refresh-sources">立即刷新</button>
+          <label class="toggle">
+            <input type="checkbox" id="source-auto-refresh" checked />
+            <span>自動更新</span>
+          </label>
+        </div>
+        <ul id="source-list" class="source-list" aria-live="polite" aria-busy="true"></ul>
+        <p id="source-empty-state" class="empty-state" hidden>尚未找到任何資料來源，請先執行匯入或等待同步完成。</p>
+      </section>
+
       <section class="panel panel--output panel--full" aria-live="polite">
         <h2>結果</h2>
         <pre id="output" class="output">等待操作...</pre>

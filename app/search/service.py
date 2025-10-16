@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
+
+import requests
 
 from app.config import settings
 from app.search.embedding import embedding_client
@@ -49,25 +50,6 @@ def _normalise_hits(raw_hits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return hits
 
 
-def _vector_ranking(hits: Iterable[Dict[str, Any]], query_vector: List[float]) -> List[Dict[str, Any]]:
-    q_norm = math.sqrt(sum(value * value for value in query_vector))
-    if q_norm == 0.0:
-        return []
-
-    ranked: List[Dict[str, Any]] = []
-    for hit in hits:
-        vector = hit.get("vector")
-        if not vector or len(vector) != len(query_vector):
-            continue
-        d_norm = math.sqrt(sum(value * value for value in vector))
-        if d_norm == 0.0:
-            continue
-        score = sum(q * d for q, d in zip(query_vector, vector)) / (q_norm * d_norm)
-        ranked.append({**hit, "score": score})
-    ranked.sort(key=lambda item: item["score"], reverse=True)
-    return ranked
-
-
 class SearchService:
     """Perform hybrid retrieval and response shaping."""
 
@@ -105,11 +87,25 @@ class SearchService:
 
         bm25_hits = _normalise_hits(bm25_response.get("hits", {}).get("hits", []))
         vector_hits: List[Dict[str, Any]] = []
-        rerank_ms = 0
+        vector_ms = 0
+        vector_error: Optional[str] = None
         if query_vector:
-            rerank_start = time.perf_counter()
-            vector_hits = _vector_ranking(bm25_hits, query_vector)
-            rerank_ms = int((time.perf_counter() - rerank_start) * 1000)
+            vector_start = time.perf_counter()
+            try:
+                knn_response = client.knn_search(
+                    query_vector,
+                    settings.vector_top_n,
+                    filter_clauses,
+                )
+                vector_hits = _normalise_hits(knn_response.get("hits", {}).get("hits", []))
+            except requests.HTTPError as exc:
+                vector_error = f"HTTP {exc.response.status_code} {exc.response.reason if exc.response else ''}".strip()
+                LOGGER.warning("k-NN search failed with HTTP error: %s", exc)
+            except requests.RequestException as exc:
+                vector_error = str(exc)
+                LOGGER.warning("k-NN search failed: %s", exc)
+            finally:
+                vector_ms = int((time.perf_counter() - vector_start) * 1000)
 
         fused = reciprocal_rank_fusion([bm25_hits, vector_hits], k=settings.rrf_k)
         top_hits = fused[: settings.query_top_k]
@@ -123,14 +119,35 @@ class SearchService:
         diagnostics = {
             "embedding_ms": embed_ms,
             "retrieval_ms": retrieval_ms,
-            "rerank_ms": rerank_ms,
+            "vector_ms": vector_ms,
+            "rerank_ms": vector_ms,
             "total_ms": total_ms,
             "bm25_query": text_query,
             "bm25_hits": len(bm25_hits),
             "vector_hits": len(vector_hits),
-            "fusion_ms": rerank_ms,
-            "query_body": {"text": text_query},
+            "fusion_ms": vector_ms,
+            "query_body": {
+                "text": text_query,
+                "knn": {
+                    "content_vector": {
+                        "vector": query_vector,
+                        "k": settings.vector_top_n,
+                        "num_candidates": max(settings.vector_top_n * 2, 50),
+                        **(
+                            {"filter": {"bool": {"filter": filter_clauses}}}
+                            if filter_clauses
+                            else {}
+                        ),
+                    }
+                }
+                if query_vector
+                else None,
+            },
         }
+        if vector_error:
+            diagnostics["vector_error"] = vector_error
+        if not query_vector:
+            diagnostics["query_body"].pop("knn", None)
         if settings.gemini_api_key:
             diagnostics["llm_model"] = settings.gemini_model
 

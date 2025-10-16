@@ -1,8 +1,15 @@
 const outputEl = document.getElementById("output");
 const apiKeyInput = document.getElementById("api-key-input");
+const sourceListEl = document.getElementById("source-list");
+const sourceEmptyStateEl = document.getElementById("source-empty-state");
+const sourceAutoRefreshToggle = document.getElementById("source-auto-refresh");
+const refreshSourcesButton = document.getElementById("refresh-sources");
 
 const state = {
   apiKey: localStorage.getItem("good_rag_api_key") || "",
+  sources: [],
+  autoRefresh: sourceAutoRefreshToggle ? sourceAutoRefreshToggle.checked : false,
+  sourceTimer: null,
 };
 
 const uploadState = {
@@ -107,6 +114,124 @@ function renderFileList(type) {
     li.appendChild(nameSpan);
     li.appendChild(removeBtn);
     container.appendChild(li);
+  });
+}
+
+function setSourceBusy(isBusy) {
+  if (!sourceListEl) return;
+  sourceListEl.setAttribute("aria-busy", String(isBusy));
+}
+
+function renderSourceList() {
+  if (!sourceListEl) return;
+  sourceListEl.innerHTML = "";
+
+  if (!state.sources.length) {
+    if (sourceEmptyStateEl) {
+      sourceEmptyStateEl.hidden = false;
+    }
+    setSourceBusy(false);
+    return;
+  }
+
+  if (sourceEmptyStateEl) {
+    sourceEmptyStateEl.hidden = true;
+  }
+
+  state.sources.forEach((source) => {
+    const li = document.createElement("li");
+    li.className = "source-item";
+    li.dataset.sourceId = source.id;
+
+    const meta = document.createElement("div");
+    meta.className = "source-item__meta";
+
+    const name = document.createElement("span");
+    name.className = "source-item__name";
+    name.textContent = source.name || "(未命名來源)";
+
+    const count = document.createElement("span");
+    count.className = "source-item__count";
+    count.textContent = `文件數量：${source.document_count}`;
+
+    meta.appendChild(name);
+    meta.appendChild(count);
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "icon-button";
+    deleteButton.setAttribute("aria-label", `刪除 ${source.name}`);
+    deleteButton.innerHTML =
+      '<svg viewBox="0 0 24 24" role="img" aria-hidden="true"><path d="M9 3a1 1 0 0 0-.894.553L7.382 5H5a1 1 0 1 0 0 2h.154l.72 11.52A2 2 0 0 0 7.867 20h8.266a2 2 0 0 0 1.993-1.48L18.846 7H19a1 1 0 1 0 0-2h-2.382l-.724-1.447A1 1 0 0 0 14.999 3H9Zm1.118 2h4.764l.5 1H9.618l.5-1ZM8.174 7h7.652l-.692 11H8.866L8.174 7Zm2.326 2a1 1 0 0 0-.992 1.123l.5 6a1 1 0 0 0 1.986-.246l-.5-6A1 1 0 0 0 10.5 9Zm3 0a1 1 0 0 0-.992 1.123l.5 6a1 1 0 0 0 1.986-.246l-.5-6A1 1 0 0 0 13.5 9Z"/></svg>';
+
+    deleteButton.addEventListener("click", async () => {
+      const confirmed = window.confirm(`確定要刪除來源「${source.name}」及其所有文件嗎？此操作無法復原。`);
+      if (!confirmed) return;
+      deleteButton.disabled = true;
+      deleteButton.style.opacity = "0.6";
+      try {
+        const payload = await deleteSourceEntry(source);
+        setOutput("來源已刪除", payload);
+        await refreshSourceList({ silent: true });
+      } catch (error) {
+        setOutput("刪除來源失敗", error.message || String(error));
+      } finally {
+        deleteButton.disabled = false;
+        deleteButton.style.opacity = "";
+      }
+    });
+
+    li.appendChild(meta);
+    li.appendChild(deleteButton);
+    sourceListEl.appendChild(li);
+  });
+  setSourceBusy(false);
+}
+
+const SOURCE_REFRESH_INTERVAL_MS = 15000;
+
+function clearSourcePolling() {
+  if (state.sourceTimer) {
+    clearInterval(state.sourceTimer);
+    state.sourceTimer = null;
+  }
+}
+
+function scheduleSourcePolling() {
+  clearSourcePolling();
+  if (state.autoRefresh && sourceListEl) {
+    state.sourceTimer = setInterval(() => {
+      refreshSourceList({ silent: true });
+    }, SOURCE_REFRESH_INTERVAL_MS);
+  }
+}
+
+async function refreshSourceList(options = {}) {
+  if (!sourceListEl) return;
+  const { toOutput = false, silent = false } = options;
+  if (!silent) {
+    setSourceBusy(true);
+  }
+  try {
+    const data = await apiFetch("/sources");
+    state.sources = Array.isArray(data.sources) ? data.sources : [];
+    renderSourceList();
+    if (toOutput) {
+      setOutput("資料來源", data);
+    }
+  } catch (error) {
+    if (!silent || toOutput) {
+      setOutput("來源查詢失敗", error.message || String(error));
+    }
+  } finally {
+    setSourceBusy(false);
+    scheduleSourcePolling();
+  }
+}
+
+async function deleteSourceEntry(source) {
+  return apiFetch(`/sources/${encodeURIComponent(source.id)}`, {
+    method: "DELETE",
   });
 }
 
@@ -253,12 +378,7 @@ document.getElementById("health-check").addEventListener("click", async () => {
 });
 
 document.getElementById("list-sources").addEventListener("click", async () => {
-  try {
-    const data = await apiFetch("/sources");
-    setOutput("資料來源", data);
-  } catch (error) {
-    setOutput("來源查詢失敗", error.message || String(error));
-  }
+  await refreshSourceList({ toOutput: true });
 });
 
 document.getElementById("random-uuid").addEventListener("click", async () => {
@@ -334,3 +454,22 @@ document.getElementById("job-status-form").addEventListener("submit", async (eve
 });
 
 setOutput("介面已載入", "請透過左側操作按鈕呼叫 API。");
+
+if (refreshSourcesButton) {
+  refreshSourcesButton.addEventListener("click", () => refreshSourceList());
+}
+
+if (sourceAutoRefreshToggle) {
+  sourceAutoRefreshToggle.addEventListener("change", () => {
+    state.autoRefresh = sourceAutoRefreshToggle.checked;
+    if (state.autoRefresh) {
+      refreshSourceList({ silent: true });
+    } else {
+      clearSourcePolling();
+    }
+  });
+}
+
+if (sourceListEl) {
+  refreshSourceList({ silent: true });
+}
